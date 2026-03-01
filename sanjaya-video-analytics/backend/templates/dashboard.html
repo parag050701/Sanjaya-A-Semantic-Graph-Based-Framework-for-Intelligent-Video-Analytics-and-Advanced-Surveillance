@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 </head>
 <body>
   <nav class="top-nav">
@@ -18,8 +19,22 @@
       <input id="videoFile" type="file" accept="video/*" hidden onchange="handleFileSelected()">
       <button id="uploadBtn" class="btn ghost" onclick="document.getElementById('videoFile').click()">📤 Upload Video</button>
       <button id="analyzeBtn" class="btn primary" onclick="uploadVideo()">⚡ Analyze</button>
+      <button class="btn ghost" onclick="exportReport('json')" title="Download JSON report">⬇ JSON</button>
+      <button class="btn ghost" onclick="exportReport('csv')"  title="Download CSV events">⬇ CSV</button>
     </div>
   </nav>
+
+  <!-- ── Progress Overlay ── -->
+  <div id="progressOverlay" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;
+       background:rgba(15,15,30,0.82);padding:28px 0;text-align:center;">
+    <div style="color:#fff;font-size:15px;font-weight:600;margin-bottom:12px;" id="progressMsg">Initialising…</div>
+    <div style="width:60%;margin:0 auto;background:#2d3748;border-radius:999px;overflow:hidden;height:12px;">
+      <div id="progressBar" style="height:12px;background:linear-gradient(90deg,#667eea,#764ba2);
+           border-radius:999px;width:0%;transition:width 0.4s ease;"></div>
+    </div>
+    <div style="color:#a0aec0;font-size:12px;margin-top:8px;" id="progressPct">0%</div>
+    <div style="margin-top:14px;display:flex;justify-content:center;gap:12px;flex-wrap:wrap;" id="stageChips"></div>
+  </div>
 
   <div id="uploadStatus" class="status-banner"></div>
 
@@ -51,6 +66,20 @@
       <div class="card">
         <h2>🗺️ Zone Activity Heatmap</h2>
         <canvas id="zoneChart" width="100" height="80"></canvas>
+      </div>
+
+      <!-- Posture Summary (new) -->
+      <div class="card" id="postureCard" style="display:none;">
+        <h2>🧍 Posture Detection</h2>
+        <div id="postureSummary" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;"></div>
+      </div>
+
+      <!-- Session History (new) -->
+      <div class="card">
+        <h2>📂 Session History</h2>
+        <div id="sessionList" style="max-height:260px;overflow-y:auto;font-size:12px;">
+          <p style="color:#a0aec0;">No previous sessions</p>
+        </div>
       </div>
     </aside>
 
@@ -335,6 +364,141 @@
 
   <script src="{{ url_for('static', filename='js/charts.js') }}"></script>
   <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+
+  <!-- ── SocketIO Progress + Export + Sessions ── -->
+  <script>
+  // ── SocketIO live progress ──────────────────────────────────────────────────
+  const socket = io();
+  const STAGE_LABELS = {
+    upload:      '📤 Upload',
+    cleanup:     '🧹 Cleanup',
+    cv_pipeline: '🔍 CV Pipeline',
+    frames:      '🖼 Frames',
+    vlm:         '🤖 VLM',
+    neo4j:       '🕸 Neo4j',
+    rag:         '📚 RAG',
+    done:        '✅ Done',
+    error:       '❌ Error',
+  };
+
+  socket.on('progress', (d) => {
+    const overlay = document.getElementById('progressOverlay');
+    const bar     = document.getElementById('progressBar');
+    const msg     = document.getElementById('progressMsg');
+    const pct     = document.getElementById('progressPct');
+    const chips   = document.getElementById('stageChips');
+
+    overlay.style.display = 'block';
+    bar.style.width  = d.pct + '%';
+    pct.textContent  = d.pct + '%';
+    msg.textContent  = (STAGE_LABELS[d.stage] || d.stage) + ' — ' + d.msg;
+
+    // add stage chip
+    const existing = chips.querySelector(`[data-stage="${d.stage}"]`);
+    if (!existing) {
+      const chip = document.createElement('span');
+      chip.dataset.stage = d.stage;
+      chip.textContent   = STAGE_LABELS[d.stage] || d.stage;
+      chip.style.cssText = 'padding:4px 10px;border-radius:12px;background:#667eea;color:#fff;font-size:11px;';
+      chips.appendChild(chip);
+    }
+    if (d.pct >= 100 || d.stage === 'error') {
+      setTimeout(() => {
+        overlay.style.display = 'none';
+        chips.innerHTML = '';
+      }, 1800);
+    }
+  });
+
+  // ── Export report ──────────────────────────────────────────────────────────
+  function exportReport(fmt) {
+    window.location.href = '/api/export/report?format=' + fmt;
+  }
+
+  // ── Session history ────────────────────────────────────────────────────────
+  async function loadSessions() {
+    try {
+      const r = await fetch('/api/sessions');
+      const d = await r.json();
+      const sessions = d.sessions || [];
+      const list = document.getElementById('sessionList');
+      if (sessions.length === 0) {
+        list.innerHTML = '<p style="color:#a0aec0;">No previous sessions</p>';
+        return;
+      }
+      list.innerHTML = sessions.map(s => {
+        const riskColor = s.risk_level === 'high'   ? '#e53e3e' :
+                          s.risk_level === 'medium' ? '#f6ad55' : '#48bb78';
+        const time = new Date(s.timestamp).toLocaleTimeString();
+        const date = new Date(s.timestamp).toLocaleDateString();
+        return `
+          <div style="padding:8px;border-left:3px solid ${riskColor};
+               background:#f7fafc;border-radius:4px;margin-bottom:6px;">
+            <div style="font-weight:600;color:#2d3748;overflow:hidden;
+                 text-overflow:ellipsis;white-space:nowrap;" title="${s.filename}">${s.filename}</div>
+            <div style="color:#718096;font-size:11px;">${date} ${time}</div>
+            <div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap;">
+              <span style="color:${riskColor};font-weight:600;">${(s.risk_level||'low').toUpperCase()}</span>
+              <span style="color:#4a5568;">${s.event_count||0} events</span>
+              <span style="color:#4a5568;">${(s.detected_objects||[]).slice(0,3).join(', ')||'–'}</span>
+            </div>
+          </div>`;
+      }).join('');
+    } catch(e) { console.error('Sessions load failed:', e); }
+  }
+
+  // ── Posture summary display ────────────────────────────────────────────────
+  function displayPostureSummary(postureSummary) {
+    if (!postureSummary || Object.keys(postureSummary).length === 0) return;
+    const card = document.getElementById('postureCard');
+    const div  = document.getElementById('postureSummary');
+    const icons = { standing:'🧍', crouching:'🤸', sitting:'🪑', running:'🏃', unknown:'❓' };
+    div.innerHTML = Object.entries(postureSummary).map(([k,v]) =>
+      `<div style="background:#f7fafc;border-radius:6px;padding:10px;text-align:center;">
+         <div style="font-size:22px;">${icons[k]||'👤'}</div>
+         <div style="font-weight:700;color:#2d3748;">${v}</div>
+         <div style="font-size:11px;color:#718096;">${k}</div>
+       </div>`
+    ).join('');
+    card.style.display = 'block';
+  }
+
+  // Hook into existing uploadVideo to show overlay + update posture after done
+  const _origUploadVideo = window.uploadVideo;
+  window.uploadVideo = async function() {
+    const file = document.getElementById('videoFile').files[0];
+    if (!file) { showStatus('Please choose a video file','error'); return; }
+    // Show overlay immediately
+    document.getElementById('progressOverlay').style.display = 'block';
+    document.getElementById('progressMsg').textContent = '📤 Uploading…';
+    document.getElementById('progressBar').style.width = '2%';
+    document.getElementById('stageChips').innerHTML = '';
+    // Run pipeline
+    const fd = new FormData(); fd.append('file', file);
+    try {
+      const resp = await fetch('/pipeline/upload', { method:'POST', body:fd });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Upload failed');
+      showStatus(`Done — ${data.salient_frames?.length||0} salient frames · risk: ${data.insights?.overall_risk||'low'}`, 'success');
+      updateStats(data);
+      displaySalientFrames(data.salient_frames||[]);
+      displayVLMAnalysis(data.vlm_results||[], data.insights||{});
+      displayEvents(data);
+      if (data.insights?.posture_summary) displayPostureSummary(data.insights.posture_summary);
+      await loadSessions();
+      setTimeout(() => { try { if (typeof renderCharts === 'function') renderCharts(data); } catch(e){} }, 400);
+      setTimeout(() => { try { loadEventInsightsFromFile(); } catch(e){} }, 800);
+    } catch(e) {
+      showStatus(e.message,'error');
+      document.getElementById('progressOverlay').style.display = 'none';
+    }
+  };
+
+  // Load sessions on page load
+  document.addEventListener('DOMContentLoaded', () => {
+    loadSessions();
+  });
+  </script>
   <script>
     async function askGraphQuestion() {
       const query = document.getElementById('graph-query').value.trim();

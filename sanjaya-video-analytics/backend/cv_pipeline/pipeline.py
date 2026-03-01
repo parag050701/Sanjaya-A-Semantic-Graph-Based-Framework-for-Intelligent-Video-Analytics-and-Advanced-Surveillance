@@ -9,6 +9,7 @@ from .detector import YOLODetector
 from .tracking import DeepSORTTracker
 from .zones import ZoneAnalyzer
 from .event_detection import EventGenerator
+from .pose_estimator import PoseEstimator
 
 log = logging.getLogger("cv_pipeline")
 
@@ -20,7 +21,8 @@ class CVPipeline:
         self.tracker = DeepSORTTracker()
         self.zone_analyzer = ZoneAnalyzer()
         self.event_gen = EventGenerator()
-        log.info("[CV] ✅ Pipeline initialized")
+        self.pose_estimator = PoseEstimator()
+        log.info("[CV] ✅ Pipeline initialized (with MediaPipe Pose)")
 
     def process_video(self, video_path: str, output_dir="json_outputs"):
         """
@@ -195,6 +197,20 @@ class CVPipeline:
         log.info(f"[CV] Selected {len(top_salient)} frames with highest activity")
         for idx, (fid, score, _, meta) in enumerate(top_salient, 1):
             log.info(f"  #{idx} Frame {fid}: activity={score:.1f}, {len(meta['persons'])} persons")
+
+        # --- POSE ESTIMATION on salient frames only (no speed penalty on main loop) ---
+        enriched_salient = []
+        for fid, score, frame_img, meta in top_salient:
+            if frame_img is not None:
+                for person in meta.get('persons', []):
+                    bbox = person.get('bbox', [])
+                    if len(bbox) == 4:
+                        person['posture'] = self.pose_estimator.estimate(frame_img, bbox)
+                    else:
+                        person['posture'] = 'unknown'
+            enriched_salient.append((fid, score, frame_img, meta))
+        top_salient = enriched_salient
+        log.info("[CV] ✅ Pose estimation complete on salient frames")
         
         # Save stats
         stats = {
